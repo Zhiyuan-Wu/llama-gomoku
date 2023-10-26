@@ -63,18 +63,22 @@ class MCTS():
                         break
             pv.append(_pv)
 
-        if temp == 0:
-            bestAs = np.array(np.argwhere(counts == np.max(counts))).flatten()
-            bestA = np.random.choice(bestAs)
-            probs = [0] * len(counts)
-            probs[bestA] = 1
-            return probs
+        # bestAs = np.array(np.argwhere(counts == np.max(counts))).flatten()
+        # bestA = np.random.choice(bestAs)
+        # probs = [0] * len(counts)
+        # probs[bestA] = 1
 
-        counts = [x ** (1. / temp) for x in counts]
-        counts_sum = float(sum(counts))
-        probs = [x / counts_sum for x in counts]
+        _counts = np.exp((np.array(counts) * 1.0 - np.max(counts)) / temp)
+        counts_sum = np.sum(_counts)
+        _counts = _counts / counts_sum
+        probs = _counts.tolist()
+        
+        _counts = np.array(counts) * 1.0
+        counts_sum = np.sum(_counts)
+        _counts = _counts / counts_sum
+        
         if analyze:
-            return probs, winrate, pv
+            return probs, _counts, winrate, pv
         else:
             return probs
 

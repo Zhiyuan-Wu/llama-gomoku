@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 class GobangNNetArgs:
     game_size: int = 15
-    numMCTSSims: int = 1000
+    numMCTSSims: int = 300
     cpuct: int = 1
     dirichlet_alpha: float = 0.03
     dirichlet_weight: float = 0.3
