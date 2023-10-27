@@ -19,6 +19,8 @@ class GobangNNetArgs:
     num_channels: int = 128
     block_num: int = 6
 
+    no_head: bool = False
+
 class GobangNNet(nn.Module):
     def __init__(self, game, args):
         # game params
@@ -39,13 +41,14 @@ class GobangNNet(nn.Module):
             self.bn_layers.append(nn.BatchNorm2d(args.num_channels))
             self.bn_layers.append(nn.BatchNorm2d(args.num_channels))
 
-        self.fc1 = nn.Linear(args.num_channels*(self.board_x)*(self.board_y), 1024)
-        self.fc_bn1 = nn.BatchNorm1d(1024)
-        self.fc2 = nn.Linear(1024, 512)
-        self.fc_bn2 = nn.BatchNorm1d(512)
+        if not self.args.no_head:
+            self.fc1 = nn.Linear(args.num_channels*(self.board_x)*(self.board_y), 1024)
+            self.fc_bn1 = nn.BatchNorm1d(1024)
+            self.fc2 = nn.Linear(1024, 512)
+            self.fc_bn2 = nn.BatchNorm1d(512)
 
-        self.fc3 = nn.Linear(512, self.action_size)
-        self.fc4 = nn.Linear(512, 3)
+            self.fc3 = nn.Linear(512, self.action_size)
+            self.fc4 = nn.Linear(512, 3)
 
     def forward(self, s):
         s = s.view(-1, 1, self.board_x, self.board_y)
@@ -58,15 +61,18 @@ class GobangNNet(nn.Module):
             _s = self.conv_layers[2*i+1](_s)
             s = _s + s
 
-        s = s.view(-1, self.num_channels*(self.board_x)*(self.board_y))
+        if not self.args.no_head:
+            s = s.view(-1, self.num_channels*(self.board_x)*(self.board_y))
 
-        s = F.dropout(F.relu(self.fc_bn1(self.fc1(s))), p=self.args.dropout, training=self.training)  # batch_size x 1024
-        s = F.dropout(F.relu(self.fc_bn2(self.fc2(s))), p=self.args.dropout, training=self.training)  # batch_size x 512
+            s = F.dropout(F.relu(self.fc_bn1(self.fc1(s))), p=self.args.dropout, training=self.training)  # batch_size x 1024
+            s = F.dropout(F.relu(self.fc_bn2(self.fc2(s))), p=self.args.dropout, training=self.training)  # batch_size x 512
 
-        pi = self.fc3(s)                                                                         # batch_size x action_size
-        v = self.fc4(s)                                                                          # batch_size x 1
+            pi = self.fc3(s)                                                                         # batch_size x action_size
+            v = self.fc4(s)                                                                          # batch_size x 1
 
-        return F.log_softmax(pi, dim=1), v
+            return F.log_softmax(pi, dim=1), v
+        else:
+            return s
 
 def loss_pi(targets, outputs):
     ''' This function compute policy loss.

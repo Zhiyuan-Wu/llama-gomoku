@@ -7,11 +7,13 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple, TypedDict
+import numpy as np
 
 import torch
 import torch.nn.functional as F
 
-from llama.model import ModelArgs, Transformer
+from gobang.GobangNNet import GobangNNetArgs
+from llama.model import ModelArgs, Llama_GO
 from llama.tokenizer import Tokenizer
 
 import loralib
@@ -52,6 +54,8 @@ class Llama:
         model_parallel_size: Optional[int] = None,
         seed: int = 1,
         lora_path: Optional[str] = None,
+        GobangNNet_path: Optional[str] = None,
+        projection_weight_path: Optional[str] = None,
     ) -> "Llama":
         """
         Build a Llama instance by initializing and loading a pre-trained model.
@@ -76,7 +80,7 @@ class Llama:
             and loads the pre-trained model and tokenizer.
 
         """
-        torch.cuda.set_device(0)
+        # torch.cuda.set_device(0)
 
         # seed must be the same in all processes
         torch.manual_seed(seed)
@@ -85,7 +89,7 @@ class Llama:
         checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
         assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
         ckpt_path = checkpoints[0]
-        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        
         with open(Path(ckpt_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
 
@@ -96,26 +100,59 @@ class Llama:
         )
         tokenizer = Tokenizer(model_path=tokenizer_path)
         model_args.vocab_size = tokenizer.n_words
-        torch.set_default_tensor_type(torch.cuda.HalfTensor)
-        model = Transformer(model_args)
-        loralib.mark_only_lora_as_trainable(model)
-        model.load_state_dict(checkpoint, strict=False)
+        # torch.set_default_tensor_type(torch.cuda.HalfTensor)
+        model = Llama_GO(model_args, GobangNNetArgs())
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        model.transformer.load_state_dict(checkpoint, strict=False)
+        if GobangNNet_path is not None:
+            GobangNNet_checkpoint = torch.load(GobangNNet_path, map_location="cpu")
+            model.policynet.load_state_dict(GobangNNet_checkpoint, strict=False)
+        if projection_weight_path is not None:
+            projection_weight_checkpoint = torch.load(projection_weight_path, map_location="cpu")
+            model.load_state_dict(projection_weight_checkpoint, strict=False)
         if lora_path is not None:
             lora_checkpoint = torch.load(lora_path, map_location="cpu")
             model.load_state_dict(lora_checkpoint, strict=False)
-        print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
+        print(f"Loaded in {time.time() - start_time:.2f} seconds")
         return Llama(model, tokenizer)
 
-    def __init__(self, model: Transformer, tokenizer: Tokenizer):
+    def __init__(self, model: Llama_GO, tokenizer: Tokenizer):
         self.model = model
         self.tokenizer = tokenizer
 
-    def compute_loss(self, prompts, completions):
-        prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
-        completion_tokens = [self.tokenizer.encode(x, bos=False, eos=False) for x in completions]
+    def set_require_grad(self, text=False, text_lora=False, projection=True, policy=False):
+        for n, p in self.model.transformer.named_parameters():
+            if 'lora_' not in n:
+                p.requires_grad = text
+        for n, p in self.model.transformer.named_parameters():
+            if 'lora_' in n:
+                p.requires_grad = text_lora
+        for n, p in self.model.W.named_parameters():
+            p.requires_grad = projection
+        for n, p in self.model.policynet.named_parameters():
+            p.requires_grad = policy
 
-        params = self.model.params
+    def multi_modal_encode(self, sentence, bos, eos):
+        target = "<board>"
+        target_index = sentence.index(target)
+        _left_half = sentence[:target_index]
+        _right_half = sentence[target_index+len(target):]
+        _left_half_token = self.tokenizer.encode(_left_half, bos=bos, eos=False)
+        _right_half_token = self.tokenizer.encode(_right_half, bos=False, eos=eos)
+        target_token = [self.tokenizer.pad_id] * 15 * 15
+        return _left_half_token + target_token + _right_half_token, len(_left_half_token)
+    
+    def compute_loss(self, boards, prompts, completions):
+        prompt_tokens = []
+        board_index = []
+        for i,x in enumerate(prompts):
+            _token, _board_index = self.multi_modal_encode(x, bos=True, eos=False)
+            prompt_tokens.append(_token)
+            board_index.append(_board_index)
+        completion_tokens = [self.tokenizer.encode(x, bos=False, eos=True) for x in completions]
+
+        params = self.model.transformer.params
         bsz = len(prompt_tokens)
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
 
@@ -124,12 +161,15 @@ class Llama:
         assert total_len <= params.max_seq_len
 
         pad_id = self.tokenizer.pad_id
-        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
+        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda:0")
         for k, (p, t) in enumerate(zip(prompt_tokens, completion_tokens)):
             tokens[k, :len(p)] = torch.tensor(p, dtype=torch.long, device="cuda")
             tokens[k, len(p):len(p)+len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
 
-        logits = self.model.forward(tokens, 0)
+        # boards = torch.FloatTensor(np.array(boards,dtype=np.float32))
+        boards = torch.tensor(boards, dtype=torch.float32, device="cuda:1")
+
+        logits = self.model.forward(tokens, boards, board_index, 0)
         for k, p in enumerate(prompt_tokens):
             tokens[k, :len(p)] = pad_id
         loss = F.cross_entropy(

@@ -10,8 +10,11 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
+import numpy as np
 
 import loralib
+from gobang.GobangNNet import GobangNNet, GobangNNetArgs
+from gobang.GobangGame import GobangGame
 
 @dataclass
 class ModelArgs:
@@ -453,20 +456,22 @@ class Transformer(nn.Module):
             self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
         )
 
-    def forward(self, tokens: torch.Tensor, start_pos: int):
+    def forward(self, tokens: torch.Tensor, start_pos: int, apply_embedding: bool = True):
         """
         Perform a forward pass through the Transformer model.
 
         Args:
             tokens (torch.Tensor): Input token indices.
             start_pos (int): Starting position for attention caching.
+            apply_embedding (bool): If False, suppose embeddings instead of tokens, and skip the embedding layer
 
         Returns:
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
         _bsz, seqlen = tokens.shape
-        h = self.tok_embeddings(tokens)
+        if apply_embedding:
+            h = self.tok_embeddings(tokens)
         self.freqs_cis = self.freqs_cis.to(h.device)
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
 
@@ -481,4 +486,30 @@ class Transformer(nn.Module):
             h = layer(h, start_pos, freqs_cis, mask)
         h = self.norm(h)
         output = self.output(h).float()
+        return output
+
+class Llama_GO(nn.Module):
+    def __init__(self, Transformer_params: ModelArgs, GobangNNet_params: GobangNNetArgs):
+        super().__init__()
+        self.Transformer_params = Transformer_params
+        self.GobangNNet_params = GobangNNet_params
+        self.game = GobangGame()
+        self.board_embedding_len = self.game.n ** 2
+        self.GobangNNet_params.__setattr__('no_head', True)
+        self.policynet = GobangNNet(self.game, GobangNNet_params).cuda(1)
+        self.W = nn.Linear(GobangNNetArgs.num_channels, ModelArgs.dim).cuda(1)
+        torch.set_default_tensor_type(torch.cuda.HalfTensor)
+        self.transformer = Transformer(Transformer_params).cuda(0)
+
+    def forward(self, tokens, board, board_index, start_pos):
+        h = self.transformer.tok_embeddings(tokens)
+        board_feature = self.policynet.forward(board)
+        board_feature = board_feature.view(-1, self.GobangNNet_params.num_channels, self.board_embedding_len).transpose(1,2)
+        board_embedding = self.W(board_feature).to(h)
+
+        for i,k in enumerate(board_index):
+            h[i, k : k + 225] = board_embedding[i]
+        
+        output = self.transformer.forward(h, start_pos, False)
+
         return output
