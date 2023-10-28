@@ -80,32 +80,30 @@ class Llama:
             and loads the pre-trained model and tokenizer.
 
         """
-        # torch.cuda.set_device(0)
+        torch.set_default_device('cuda:0')
+        torch.set_default_tensor_type(torch.HalfTensor)
 
         # seed must be the same in all processes
         torch.manual_seed(seed)
 
         start_time = time.time()
-        checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
-        assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
-        ckpt_path = checkpoints[0]
         
         with open(Path(ckpt_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
-
-        model_args: ModelArgs = ModelArgs(
-            max_seq_len=max_seq_len,
-            max_batch_size=max_batch_size,
-            **params,
-        )
+        model_args = ModelArgs(max_seq_len=max_seq_len, max_batch_size=max_batch_size, device='cuda:0', **params,)
         tokenizer = Tokenizer(model_path=tokenizer_path)
         model_args.vocab_size = tokenizer.n_words
-        # torch.set_default_tensor_type(torch.cuda.HalfTensor)
-        model = Llama_GO(model_args, GobangNNetArgs())
-        checkpoint = torch.load(ckpt_path, map_location="cpu")
-        model.transformer.load_state_dict(checkpoint, strict=False)
+
+        model = Llama_GO(model_args, GobangNNetArgs(device='cuda:0'))
+
+        if ckpt_dir is not None:
+            ckpt_path = sorted(Path(ckpt_dir).glob("*.pth"))[0]
+            checkpoint = torch.load(ckpt_path, map_location="cpu")
+            model.transformer.load_state_dict(checkpoint, strict=False)
         if GobangNNet_path is not None:
             GobangNNet_checkpoint = torch.load(GobangNNet_path, map_location="cpu")
+            for k in GobangNNet_checkpoint.keys():
+                GobangNNet_checkpoint[k] = GobangNNet_checkpoint[k].half()
             model.policynet.load_state_dict(GobangNNet_checkpoint, strict=False)
         if projection_weight_path is not None:
             projection_weight_checkpoint = torch.load(projection_weight_path, map_location="cpu")
@@ -128,7 +126,7 @@ class Llama:
         for n, p in self.model.transformer.named_parameters():
             if 'lora_' in n:
                 p.requires_grad = text_lora
-        for n, p in self.model.W.named_parameters():
+        for n, p in self.model.projection.named_parameters():
             p.requires_grad = projection
         for n, p in self.model.policynet.named_parameters():
             p.requires_grad = policy
@@ -140,7 +138,7 @@ class Llama:
         _right_half = sentence[target_index+len(target):]
         _left_half_token = self.tokenizer.encode(_left_half, bos=bos, eos=False)
         _right_half_token = self.tokenizer.encode(_right_half, bos=False, eos=eos)
-        target_token = [self.tokenizer.pad_id] * 15 * 15
+        target_token = [0] * 15 * 15
         return _left_half_token + target_token + _right_half_token, len(_left_half_token)
     
     def compute_loss(self, boards, prompts, completions):
@@ -161,20 +159,21 @@ class Llama:
         assert total_len <= params.max_seq_len
 
         pad_id = self.tokenizer.pad_id
-        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda:0")
+        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device=self.model.transformer.params.device)
         for k, (p, t) in enumerate(zip(prompt_tokens, completion_tokens)):
-            tokens[k, :len(p)] = torch.tensor(p, dtype=torch.long, device="cuda")
-            tokens[k, len(p):len(p)+len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+            tokens[k, :len(p)] = torch.tensor(p, dtype=torch.long, device=self.model.transformer.params.device)
+            tokens[k, len(p):len(p)+len(t)] = torch.tensor(t, dtype=torch.long, device=self.model.transformer.params.device)
 
         # boards = torch.FloatTensor(np.array(boards,dtype=np.float32))
-        boards = torch.tensor(boards, dtype=torch.float32, device="cuda:1")
+        # boards = torch.tensor(boards, dtype=torch.float16, device=self.model.transformer.params.device)
+        boards = boards.half().to(torch.device(self.model.transformer.params.device))
 
         logits = self.model.forward(tokens, boards, board_index, 0)
         for k, p in enumerate(prompt_tokens):
             tokens[k, :len(p)] = pad_id
         loss = F.cross_entropy(
                 input=logits.transpose(1, 2),
-                target=torch.cat([tokens[:, 1:], torch.full((bsz, 1), pad_id, dtype=torch.long, device="cuda")], dim=1),
+                target=torch.cat([tokens[:, 1:], torch.full((bsz, 1), pad_id, dtype=torch.long, device=self.model.transformer.params.device)], dim=1),
                 reduction="mean",
                 ignore_index=pad_id,
                 )
@@ -220,14 +219,14 @@ class Llama:
         total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)
 
         pad_id = self.tokenizer.pad_id
-        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
+        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device=self.model.transformer.params.device)
         for k, t in enumerate(prompt_tokens):
-            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device=self.model.transformer.params.device)
         if logprobs:
             token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
 
         prev_pos = 0
-        eos_reached = torch.tensor([False] * bsz, device="cuda")
+        eos_reached = torch.tensor([False] * bsz, device=self.model.transformer.params.device)
         input_text_mask = tokens != pad_id
         if min_prompt_len == total_len:
             logits = self.model.forward(tokens, prev_pos)

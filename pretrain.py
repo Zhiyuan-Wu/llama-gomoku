@@ -8,6 +8,7 @@ import os
 import tqdm
 import loralib
 from pathlib import Path
+import numpy as np
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -53,7 +54,7 @@ class multi_modal_dataset(Dataset):
                 lines = fin.readlines()
                 for line in lines:
                     data = json.loads(line)
-                    self.instances.append((data["canonicalBoard"], data["prompt"], data["completion"]))
+                    self.instances.append((np.array(data["canonicalBoard"]), data["prompt"], data["completion"]))
 
     def __len__(self):
         return len(self.instances)
@@ -87,6 +88,7 @@ if __name__ == "__main__":
 
     progress_bar = tqdm.tqdm(total=args.epoch_num * len(dataset))
     loss_ma = 0
+    steps_counter = 0
     model.model.train()
     for e in range(args.epoch_num):
         for batch, (b, p, t) in enumerate(dataset):
@@ -97,6 +99,8 @@ if __name__ == "__main__":
             optimizer.step()
             progress_bar.set_postfix(loss=loss_ma)
             progress_bar.update(1)
+            steps_counter += 1
             
-        torch.save(loralib.lora_state_dict(model.model), os.path.join(args.saved_path, f"{args.saved_name}_e{e}.pth"))
+            if steps_counter % 100000 == 0:
+                torch.save(model.model.projection.state_dict(), os.path.join(args.saved_path, f"{args.saved_name}_step{steps_counter}.pth"))
             

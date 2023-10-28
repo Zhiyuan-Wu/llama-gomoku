@@ -28,6 +28,7 @@ class ModelArgs:
     norm_eps: float = 1e-5
     lora_r: int = 4
     lora_dropout: float = 0.0
+    device: str = 'cuda:0'
 
     max_batch_size: int = 32
     max_seq_len: int = 2048
@@ -240,16 +241,18 @@ class Attention(nn.Module):
                 args.max_seq_len,
                 self.n_local_kv_heads,
                 self.head_dim,
-            )
-        ).cuda()
+            ),
+            device=args.device
+        )
         self.cache_v = torch.zeros(
             (
                 args.max_batch_size,
                 args.max_seq_len,
                 self.n_local_kv_heads,
                 self.head_dim,
-            )
-        ).cuda()
+            ),
+            device=args.device
+        )
 
     def forward(
         self,
@@ -469,9 +472,14 @@ class Transformer(nn.Module):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        _bsz, seqlen = tokens.shape
+        
         if apply_embedding:
+            _bsz, seqlen = tokens.shape
             h = self.tok_embeddings(tokens)
+        else:
+            _bsz, seqlen, _dim = tokens.shape
+            h = tokens
+
         self.freqs_cis = self.freqs_cis.to(h.device)
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
 
@@ -496,16 +504,15 @@ class Llama_GO(nn.Module):
         self.game = GobangGame()
         self.board_embedding_len = self.game.n ** 2
         self.GobangNNet_params.__setattr__('no_head', True)
-        self.policynet = GobangNNet(self.game, GobangNNet_params).cuda(1)
-        self.W = nn.Linear(GobangNNetArgs.num_channels, ModelArgs.dim).cuda(1)
-        torch.set_default_tensor_type(torch.cuda.HalfTensor)
-        self.transformer = Transformer(Transformer_params).cuda(0)
+        self.policynet = GobangNNet(self.game, GobangNNet_params).to(torch.device(GobangNNet_params.device))
+        self.projection = nn.Linear(GobangNNetArgs.num_channels, ModelArgs.dim).to(torch.device(GobangNNet_params.device))
+        self.transformer = Transformer(Transformer_params).to(torch.device(Transformer_params.device))
 
     def forward(self, tokens, board, board_index, start_pos):
         h = self.transformer.tok_embeddings(tokens)
         board_feature = self.policynet.forward(board)
         board_feature = board_feature.view(-1, self.GobangNNet_params.num_channels, self.board_embedding_len).transpose(1,2)
-        board_embedding = self.W(board_feature).to(h)
+        board_embedding = self.projection(board_feature).to(h)
 
         for i,k in enumerate(board_index):
             h[i, k : k + 225] = board_embedding[i]

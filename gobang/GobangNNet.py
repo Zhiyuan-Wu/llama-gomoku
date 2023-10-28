@@ -1,11 +1,13 @@
 import sys
 sys.path.append('..')
 
+from dataclasses import dataclass
 from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+@dataclass
 class GobangNNetArgs:
     game_size: int = 15
     numMCTSSims: int = 300
@@ -20,6 +22,7 @@ class GobangNNetArgs:
     block_num: int = 6
 
     no_head: bool = False
+    device: str = 'cuda:0'
 
 class GobangNNet(nn.Module):
     def __init__(self, game, args):
