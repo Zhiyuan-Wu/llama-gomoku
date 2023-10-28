@@ -53,7 +53,7 @@ def consume_prefix_in_state_dict_if_present(state_dict, prefix):
             metadata[newkey] = metadata.pop(key)
 
 def action2str(action, n=15):
-    return "{}{}".format("ABCDEFGHJKLMNOPQRSTYVWYZ"[action%n], action//n+1)
+    return "{}{}".format("ABCDEFGHJKLMNOPQRSTUVWXYZ"[action%n], action//n+1)
 
 action2strl = lambda y: [action2str(x) for x in y]
 
