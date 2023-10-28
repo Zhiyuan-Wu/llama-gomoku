@@ -165,3 +165,5 @@ tokenizer.model
 tokenizer_checklist.chk
 *.pth
 *pb2*.py
+*pb2*.pyi
+temp_test.py

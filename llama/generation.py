@@ -54,8 +54,8 @@ class Llama:
         model_parallel_size: Optional[int] = None,
         seed: int = 1,
         lora_path: Optional[str] = None,
-        GobangNNet_path: Optional[str] = None,
-        projection_weight_path: Optional[str] = None,
+        policy_path: Optional[str] = None,
+        projection_path: Optional[str] = None,
     ) -> "Llama":
         """
         Build a Llama instance by initializing and loading a pre-trained model.
@@ -100,13 +100,13 @@ class Llama:
             ckpt_path = sorted(Path(ckpt_dir).glob("*.pth"))[0]
             checkpoint = torch.load(ckpt_path, map_location="cpu")
             model.transformer.load_state_dict(checkpoint, strict=False)
-        if GobangNNet_path is not None:
-            GobangNNet_checkpoint = torch.load(GobangNNet_path, map_location="cpu")
+        if policy_path is not None:
+            GobangNNet_checkpoint = torch.load(policy_path, map_location="cpu")
             for k in GobangNNet_checkpoint.keys():
                 GobangNNet_checkpoint[k] = GobangNNet_checkpoint[k].half()
             model.policynet.load_state_dict(GobangNNet_checkpoint, strict=False)
-        if projection_weight_path is not None:
-            projection_weight_checkpoint = torch.load(projection_weight_path, map_location="cpu")
+        if projection_path is not None:
+            projection_weight_checkpoint = torch.load(projection_path, map_location="cpu")
             model.load_state_dict(projection_weight_checkpoint, strict=False)
         if lora_path is not None:
             lora_checkpoint = torch.load(lora_path, map_location="cpu")
@@ -185,6 +185,8 @@ class Llama:
         self,
         prompt_tokens: List[List[int]],
         max_gen_len: int,
+        boards = None,
+        board_index = None,
         temperature: float = 0.6,
         top_p: float = 0.9,
         logprobs: bool = False,
@@ -209,7 +211,7 @@ class Llama:
             If logprobs is True, token log probabilities are computed for each generated token.
 
         """
-        params = self.model.params
+        params = self.model.transformer.params
         bsz = len(prompt_tokens)
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
 
@@ -229,16 +231,16 @@ class Llama:
         eos_reached = torch.tensor([False] * bsz, device=self.model.transformer.params.device)
         input_text_mask = tokens != pad_id
         if min_prompt_len == total_len:
-            logits = self.model.forward(tokens, prev_pos)
+            logits = self.model.forward(tokens, boards, board_index, prev_pos)
             token_logprobs = -F.cross_entropy(
                 input=logits.transpose(1, 2),
-                target=tokens,
+                target=torch.cat([tokens[:, 1:], torch.full((bsz, 1), pad_id, dtype=torch.long, device=self.model.transformer.params.device)], dim=1),
                 reduction="none",
                 ignore_index=pad_id,
             )
 
         for cur_pos in range(min_prompt_len, total_len):
-            logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            logits = self.model.forward(tokens[:, prev_pos:cur_pos], boards, board_index, prev_pos)
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
@@ -287,6 +289,7 @@ class Llama:
     def text_completion(
         self,
         prompts: List[str],
+        boards,
         temperature: float = 0.6,
         top_p: float = 0.9,
         max_gen_len: Optional[int] = None,
@@ -315,9 +318,19 @@ class Llama:
         """
         if max_gen_len is None:
             max_gen_len = self.model.params.max_seq_len - 1
-        prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
+        # prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
+        prompt_tokens = []
+        board_index = []
+        for i,x in enumerate(prompts):
+            _token, _board_index = self.multi_modal_encode(x, bos=True, eos=False)
+            prompt_tokens.append(_token)
+            board_index.append(_board_index)
+        if not type(boards) is torch.Tensor:
+            boards = torch.tensor(boards, dtype=torch.float16, device=self.model.policynet.args.device)
         generation_tokens, generation_logprobs = self.generate(
             prompt_tokens=prompt_tokens,
+            boards=boards,
+            board_index=board_index,
             max_gen_len=max_gen_len,
             temperature=temperature,
             top_p=top_p,

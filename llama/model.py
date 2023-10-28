@@ -510,12 +510,14 @@ class Llama_GO(nn.Module):
 
     def forward(self, tokens, board, board_index, start_pos):
         h = self.transformer.tok_embeddings(tokens)
-        board_feature = self.policynet.forward(board)
-        board_feature = board_feature.view(-1, self.GobangNNet_params.num_channels, self.board_embedding_len).transpose(1,2)
-        board_embedding = self.projection(board_feature).to(h)
+        if start_pos==0:
+            # only replace board embedding in first prompt pass
+            board_feature = self.policynet.forward(board)
+            board_feature = board_feature.view(-1, self.GobangNNet_params.num_channels, self.board_embedding_len).transpose(1,2)
+            board_embedding = self.projection(board_feature).to(h)
 
-        for i,k in enumerate(board_index):
-            h[i, k : k + 225] = board_embedding[i]
+            for i,k in enumerate(board_index):
+                h[i, k : k + 225] = board_embedding[i]
         
         output = self.transformer.forward(h, start_pos, False)
 
